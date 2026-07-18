@@ -6,38 +6,52 @@ import {
   RefreshCw, 
   Key, 
   Copy,
-  AlertCircle,
-  CheckCircle,
   HelpCircle,
   Edit,
   Save,
-  Trash2
+  Trash2,
+  Fingerprint,
+  X
 } from 'lucide-react';
+import { bufferToBase64URL, base64URLToBuffer } from './cryptoHelper';
 
 function App() {
   const [registered, setRegistered] = useState(false);
   const [vaultLocked, setVaultLocked] = useState(true);
   const [secretContent, setSecretContent] = useState('');
   
-  // Registration Form
-  const [regPath, setRegPath] = useState([]); // indices of selected dots [0..24]
+  // Onboarding Setup State
+  const [regUsername, setRegUsername] = useState('');
+  const [regPath, setRegPath] = useState([]); // indices [0..24]
   const [regRecoveryCode, setRegRecoveryCode] = useState('');
+  const [passkeyRegistered, setPasskeyRegistered] = useState(false);
+  const [registeredPasskeyCred, setRegisteredPasskeyCred] = useState(null); // stores credential info
 
-  // Challenge Dialog
+  // Step Indicators for Setup
+  const [setupStep, setSetupStep] = useState(1); // 1 = Passkey, 2 = Grid Path, 3 = Recovery/Done
+
+  // Challenge Unlock Dialog
   const [showChallenge, setShowChallenge] = useState(false);
   const [challengeId, setChallengeId] = useState('');
   const [challengeGrid, setChallengeGrid] = useState([]); // 25 characters
   const [challengeResponse, setChallengeResponse] = useState('');
   const [challengeError, setChallengeError] = useState('');
+  const [activePasskeyChallenge, setActivePasskeyChallenge] = useState('');
+  const [activePasskeyCredId, setActivePasskeyCredId] = useState('');
+  const [passkeyVerified, setPasskeyVerified] = useState(false); // Step 1 completed in verification
 
-  // Account Recovery Form
+  // Account Recovery Form (Simplified Shard Recovery)
   const [showRecovery, setShowRecovery] = useState(false);
   const [recCode, setRecCode] = useState('');
   const [recPath, setRecPath] = useState([]);
+  const [recPasskeyCred, setRecPasskeyCred] = useState(null);
+  const [recPasskeyRegistered, setRecPasskeyRegistered] = useState(false);
 
   // Editing state
   const [isEditing, setIsEditing] = useState(false);
   const [editContent, setEditContent] = useState('');
+  const [activeDocTab, setActiveDocTab] = useState(null); // 'features', 'ps', 'matrix' or null
+  const [showShardInfo, setShowShardInfo] = useState(false);
 
   // Fetch status from server
   const fetchStatus = async () => {
@@ -58,7 +72,7 @@ function App() {
     fetchStatus();
   }, []);
 
-  // Generate random recovery key for registration
+  // Generate random recovery key
   useEffect(() => {
     if (!registered) {
       const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -71,6 +85,7 @@ function App() {
     }
   }, [registered]);
 
+  // Dot Click toggles node indices
   const handleDotClick = (idx, mode = 'register') => {
     const currentPath = mode === 'register' ? regPath : recPath;
     const setPath = mode === 'register' ? setRegPath : setRecPath;
@@ -79,17 +94,110 @@ function App() {
       setPath(currentPath.filter(i => i !== idx));
     } else {
       if (currentPath.length >= 8) {
-        alert("Visual path limited to 8 nodes for cognitive ease.");
+        alert("Visual key coordinates limited to 8 nodes for memorability.");
         return;
       }
-      setPath([...currentPath, idx].sort((a, b) => a - b));
+      setPath([...currentPath, idx]);
     }
   };
 
-  const handleSetup = async (e) => {
+  // Primary Passkey Registration (Native browser prompts only)
+  const handleRegisterPasskey = async () => {
+    if (!regUsername) return alert('Username required first.');
+
+    try {
+      const challenge = new Uint8Array(32);
+      window.crypto.getRandomValues(challenge);
+      const userId = new Uint8Array(16);
+      window.crypto.getRandomValues(userId);
+
+      const rpId = window.location.hostname === 'localhost' ? 'localhost' : window.location.hostname;
+
+      const createOptions = {
+        publicKey: {
+          challenge: challenge,
+          rp: { name: "ShieldVault", id: rpId },
+          user: {
+            id: userId,
+            name: regUsername,
+            displayName: regUsername
+          },
+          pubKeyCredParams: [{ alg: -7, type: "public-key" }], // ES256 (P-256)
+          authenticatorSelection: {
+            userVerification: "preferred"
+          },
+          timeout: 60000
+        }
+      };
+
+      const credential = await navigator.credentials.create(createOptions);
+      if (credential) {
+        const credData = {
+          id: credential.id,
+          type: credential.type,
+          rawId: bufferToBase64URL(credential.rawId)
+        };
+        setRegisteredPasskeyCred(credData);
+        setPasskeyRegistered(true);
+        setSetupStep(2); // Next step: Grid Path setup
+        alert('Passkey registered successfully on this device!');
+      }
+    } catch (err) {
+      console.error("Native WebAuthn enrollment failed:", err);
+      alert(`Passkey registration failed: ${err.message || err.name}. Make sure biometrics are setup or hardware key is inserted.`);
+    }
+  };
+
+  // Recovery - Passkey Registration
+  const handleRegisterRecoveryPasskey = async () => {
+    try {
+      const challenge = new Uint8Array(32);
+      window.crypto.getRandomValues(challenge);
+      const userId = new Uint8Array(16);
+      window.crypto.getRandomValues(userId);
+
+      const rpId = window.location.hostname === 'localhost' ? 'localhost' : window.location.hostname;
+
+      const createOptions = {
+        publicKey: {
+          challenge: challenge,
+          rp: { name: "ShieldVault", id: rpId },
+          user: {
+            id: userId,
+            name: recCode || 'recovery_user',
+            displayName: recCode || 'Recovery User'
+          },
+          pubKeyCredParams: [{ alg: -7, type: "public-key" }],
+          authenticatorSelection: { userVerification: "preferred" },
+          timeout: 60000
+        }
+      };
+
+      const credential = await navigator.credentials.create(createOptions);
+      if (credential) {
+        const credData = {
+          id: credential.id,
+          type: credential.type,
+          rawId: bufferToBase64URL(credential.rawId)
+        };
+        setRecPasskeyCred(credData);
+        setRecPasskeyRegistered(true);
+        alert('New device Passkey registered successfully!');
+      }
+    } catch (err) {
+      console.error("Native recovery WebAuthn failed:", err);
+      alert(`Recovery Passkey setup failed: ${err.message || err.name}`);
+    }
+  };
+
+  // Complete Registration (Post Setup info to Server)
+  const handleSetupSubmit = async (e) => {
     e.preventDefault();
+    if (!passkeyRegistered || !registeredPasskeyCred) {
+      return alert('Register your Passkey first.');
+    }
     if (regPath.length < 3) {
-      return alert('Select at least 3 grid coordinate nodes for your visual signature key.');
+      return alert('Select at least 3 grid coordinates for your cognitive path.');
     }
 
     try {
@@ -98,14 +206,15 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           pathIndices: regPath,
-          recoveryCode: regRecoveryCode
+          recoveryCode: regRecoveryCode,
+          passkeyCredential: registeredPasskeyCred
         })
       });
       const data = await res.json();
       if (data.error) {
         alert(data.error);
       } else {
-        alert('CryptoShield Visual Wallet initialized successfully!');
+        alert('ShieldVault successfully set up and active!');
         fetchStatus();
       }
     } catch (e) {
@@ -113,6 +222,7 @@ function App() {
     }
   };
 
+  // Start two-layer Authentication sequence
   const handleUnlockRequest = async () => {
     try {
       const res = await fetch('/api/challenge');
@@ -120,12 +230,46 @@ function App() {
       if (data.success) {
         setChallengeGrid(data.grid);
         setChallengeId(data.challengeId);
+        setActivePasskeyChallenge(data.webauthnChallenge);
+        setActivePasskeyCredId(data.passkeyCredentialId);
+        
         setChallengeResponse('');
         setChallengeError('');
-        setShowChallenge(true);
+        setPasskeyVerified(false); // Reset authentication steps
+        
+        // Start Step 1: Biometric Verification
+        triggerBiometricVerification(data.passkeyCredentialId, data.webauthnChallenge);
       }
     } catch (e) {
       console.error(e);
+    }
+  };
+
+  const triggerBiometricVerification = async (credId, challenge) => {
+    try {
+      const challengeBuffer = base64URLToBuffer(challenge);
+      const credBuffer = base64URLToBuffer(credId);
+      const rpId = window.location.hostname === 'localhost' ? 'localhost' : window.location.hostname;
+
+      const getOptions = {
+        publicKey: {
+          challenge: challengeBuffer,
+          rpId: rpId,
+          allowCredentials: [{ id: credBuffer, type: "public-key" }],
+          userVerification: "required",
+          timeout: 60000
+        }
+      };
+
+      const assertion = await navigator.credentials.get(getOptions);
+      if (assertion) {
+        // Native verified, move to grid challenge modal
+        setPasskeyVerified(true);
+        setShowChallenge(true); // Open Layer 2: Grid Input
+      }
+    } catch (err) {
+      console.error("Native WebAuthn verification failed:", err);
+      alert(`Passkey verification cancelled or failed: ${err.message || err.name}. Vault remains locked.`);
     }
   };
 
@@ -139,7 +283,10 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           response: challengeResponse.toUpperCase().trim(),
-          challengeId
+          challengeId,
+          passkeyAssertion: {
+            id: activePasskeyCredId
+          }
         })
       });
       const data = await res.json();
@@ -178,18 +325,19 @@ function App() {
       if (data.success) {
         setSecretContent(editContent);
         setIsEditing(false);
-        alert('Secrets encrypted and saved successfully!');
+        alert('Vault content securely encrypted and saved!');
       } else {
         alert(data.error);
       }
     } catch (e) {
-      alert('Failed to save secrets.');
+      alert('Save failed.');
     }
   };
 
   const handleRecoverySubmit = async (e) => {
     e.preventDefault();
     if (!recCode) return alert('Recovery shard code is required.');
+    if (!recPasskeyRegistered || !recPasskeyCred) return alert('Please register a new biometric Passkey for your new device.');
     if (recPath.length < 3) return alert('Select at least 3 coordinates for your new visual key.');
 
     try {
@@ -198,17 +346,20 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           recoveryCode: recCode.trim(),
-          newPathIndices: recPath
+          newPathIndices: recPath,
+          passkeyCredential: recPasskeyCred
         })
       });
       const data = await res.json();
       if (data.error) {
         alert(data.error);
       } else {
-        alert('Recovery successful! Old credentials wiped, new visual path registered.');
+        alert('Vault successfully recovered! New device keys registered.');
         setShowRecovery(false);
         setRecCode('');
         setRecPath([]);
+        setRecPasskeyRegistered(false);
+        setRecPasskeyCred(null);
         fetchStatus();
       }
     } catch (e) {
@@ -217,15 +368,19 @@ function App() {
   };
 
   const handleResetDevice = async () => {
-    if (confirm("Reset the entire device status to demo setup again? This will delete the registered wallet.")) {
+    if (confirm("Reset the entire vault state to demo registration again?")) {
       try {
         await fetch('/api/reset-device', { method: 'POST' });
         setRegistered(false);
         setVaultLocked(true);
         setSecretContent('');
         setRegPath([]);
+        setRegUsername('');
+        setPasskeyRegistered(false);
+        setRegisteredPasskeyCred(null);
+        setSetupStep(1);
         setShowRecovery(false);
-        alert('Demo state reset. You can now register again!');
+        alert('Demo state reset. You can register again!');
       } catch (e) {
         console.error(e);
       }
@@ -233,11 +388,11 @@ function App() {
   };
 
   return (
-    <>
+    <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', boxSizing: 'border-box' }}>
       <header>
         <div className="logo-container">
           <Shield size={32} style={{ color: 'var(--neon-cyan)' }} />
-          <span className="logo-text">CryptoShield</span>
+          <span className="logo-text">ShieldVault</span>
         </div>
         
         <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
@@ -257,85 +412,191 @@ function App() {
         {!registered ? (
           <div className="glow-panel" style={{ maxWidth: '700px', margin: '40px auto' }}>
             <h2 style={{ fontFamily: 'Orbitron', marginBottom: '15px', color: 'var(--neon-cyan)', display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <Key size={24} /> Initialize Crypto Seed Vault
+              <Key size={24} /> Initialize Shield Vault
             </h2>
-            <p style={{ fontSize: '0.9rem', color: 'var(--text-muted)', marginBottom: '20px' }}>
-              Secure your high-value cryptocurrency seed phrases against malware keyloggers. 
-              Instead of a password, you will authenticate using a **secret visual grid path** that is never typed or sent in plain text.
+            <p style={{ fontSize: '0.9rem', color: 'var(--text-muted)', marginBottom: '25px' }}>
+              Secure your credentials. 
+              Setup requires registering a <strong>Biometric Passkey</strong> first, followed by drawing a <strong>Secret Visual Grid Path</strong>.
             </p>
 
-            <form onSubmit={handleSetup}>
-              <div className="cyber-group">
-                <label className="cyber-label">1. Draw Your Secret Visual Key Path</label>
-                <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '15px' }}>
-                  Click nodes on the 5x5 grid to create a unique visual shape (e.g. a diagonal line, triangle, or letters). 
-                  The coordinates will be verified top-left to bottom-right (numerical order).
-                </p>
-                
-                {/* 5x5 Grid Designer */}
-                <div style={{ display: 'flex', justifyContent: 'center', margin: '20px 0' }}>
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 45px)', gap: '12px', background: 'rgba(0,0,0,0.3)', padding: '16px', borderRadius: '12px', border: '1px solid var(--panel-border)' }}>
-                    {Array.from({ length: 25 }).map((_, idx) => {
-                      const isSelected = regPath.includes(idx);
-                      return (
-                        <button
-                          key={idx}
-                          type="button"
-                          onClick={() => handleDotClick(idx, 'register')}
-                          style={{
-                            width: '45px',
-                            height: '45px',
-                            borderRadius: '50%',
-                            background: isSelected ? 'var(--neon-cyan)' : '#111827',
-                            border: isSelected ? '2px solid #fff' : '1px solid var(--panel-border)',
-                            boxShadow: isSelected ? '0 0 15px var(--neon-cyan-glow)' : 'none',
-                            cursor: 'pointer',
-                            color: isSelected ? '#000' : 'rgba(255,255,255,0.4)',
-                            fontFamily: 'Fira Code, monospace',
-                            fontSize: '0.75rem',
-                            fontWeight: 'bold',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center'
-                          }}
-                        >
-                          {idx}
-                        </button>
-                      );
-                    })}
+            {/* Registration Steps Navigator */}
+            <div style={{ display: 'flex', gap: '15px', marginBottom: '30px', borderBottom: '1px solid var(--panel-border)', paddingBottom: '15px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: setupStep === 1 ? 'var(--neon-cyan)' : 'var(--text-muted)' }}>
+                <span style={{ border: '1px solid', borderRadius: '50%', width: '22px', height: '22px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.75rem', fontWeight: 'bold' }}>1</span>
+                <span style={{ fontWeight: setupStep === 1 ? 700 : 400 }}>Passkey</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: setupStep === 2 ? 'var(--neon-cyan)' : 'var(--text-muted)' }}>
+                <span style={{ border: '1px solid', borderRadius: '50%', width: '22px', height: '22px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.75rem', fontWeight: 'bold' }}>2</span>
+                <span style={{ fontWeight: setupStep === 2 ? 700 : 400 }}>Visual Grid</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: setupStep === 3 ? 'var(--neon-cyan)' : 'var(--text-muted)' }}>
+                <span style={{ border: '1px solid', borderRadius: '50%', width: '22px', height: '22px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.75rem', fontWeight: 'bold' }}>3</span>
+                <span style={{ fontWeight: setupStep === 3 ? 700 : 400 }}>Recovery Shard</span>
+              </div>
+            </div>
+
+            {/* Step 1: Register Passkey */}
+            {setupStep === 1 && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+                <div className="cyber-group">
+                  <label className="cyber-label">Username</label>
+                  <input 
+                    type="text" 
+                    className="cyber-input" 
+                    value={regUsername} 
+                    onChange={e => setRegUsername(e.target.value.trim().toLowerCase())} 
+                    placeholder="Enter your name to link passkey..."
+                    required 
+                  />
+                </div>
+                <button 
+                  type="button" 
+                  className="cyber-btn cyber-btn-cyan"
+                  onClick={handleRegisterPasskey}
+                  disabled={!regUsername}
+                  style={{ width: '100%', padding: '16px 0', fontSize: '1rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px' }}
+                >
+                  <Fingerprint size={20} /> Enroll Biometric Passkey
+                </button>
+              </div>
+            )}
+
+            {/* Step 2: Draw Path */}
+            {setupStep === 2 && (
+              <div>
+                <div className="cyber-group">
+                  <label className="cyber-label">Draw Secret Visual Key Path</label>
+                  <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '15px' }}>
+                    Select nodes in a visual shape. This cognitive pattern resides in your brain, ensuring protection if biometrics are bypassed.
+                  </p>
+                  
+                  {/* 5x5 Grid Designer */}
+                  <div style={{ display: 'flex', justifyContent: 'center', margin: '20px 0' }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 45px)', gap: '12px', background: 'rgba(0,0,0,0.3)', padding: '16px', borderRadius: '12px', border: '1px solid var(--panel-border)' }}>
+                      {Array.from({ length: 25 }).map((_, idx) => {
+                        const isSelected = regPath.includes(idx);
+                        return (
+                          <button
+                            key={idx}
+                            type="button"
+                            onClick={() => handleDotClick(idx, 'register')}
+                            style={{
+                              width: '45px',
+                              height: '45px',
+                              borderRadius: '50%',
+                              background: isSelected ? 'var(--neon-cyan)' : '#111827',
+                              border: isSelected ? '2px solid #fff' : '1px solid var(--panel-border)',
+                              boxShadow: isSelected ? '0 0 15px var(--neon-cyan-glow)' : 'none',
+                              cursor: 'pointer',
+                              color: isSelected ? '#000' : 'rgba(255,255,255,0.4)',
+                              fontFamily: 'Fira Code, monospace',
+                              fontSize: '0.75rem',
+                              fontWeight: 'bold',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center'
+                            }}
+                          >
+                            {idx}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', textAlign: 'center', marginBottom: '20px' }}>
+                    Your secret coordinates: {regPath.length === 0 ? 'None selected' : <strong>{regPath.join(' ➔ ')}</strong>}
                   </div>
                 </div>
-                <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', textAlign: 'center' }}>
-                  Your registered visual path coordinate indices: {regPath.length === 0 ? 'None selected' : <strong>{regPath.join(' ➔ ')}</strong>}
-                </div>
+                
+                <button 
+                  type="button" 
+                  className="cyber-btn cyber-btn-cyan"
+                  onClick={() => setSetupStep(3)}
+                  disabled={regPath.length < 3}
+                  style={{ width: '100%' }}
+                >
+                  Continue to Recovery
+                </button>
               </div>
+            )}
 
-              <div className="cyber-group" style={{ background: 'rgba(255,159,0,0.05)', border: '1px solid rgba(255,159,0,0.3)', padding: '15px', borderRadius: '8px', margin: '25px 0' }}>
-                <label className="cyber-label" style={{ color: 'var(--neon-orange)' }}>
-                  2. Backup Paper Recovery Shard
-                </label>
-                <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', margin: '6px 0' }}>
-                  Write down this backup shard code. If you ever forget your visual key path, you can use this shard to restore your wallet vault offline.
-                </p>
-                <div style={{ display: 'flex', gap: '10px', alignItems: 'center', background: 'rgba(0,0,0,0.3)', padding: '8px 12px', borderRadius: '4px', border: '1px solid rgba(255,159,0,0.2)' }}>
-                  <code style={{ fontFamily: 'Fira Code', fontSize: '0.9rem', color: 'var(--neon-orange)', flex: 1 }}>{regRecoveryCode}</code>
-                  <button 
-                    type="button" 
-                    onClick={() => {
-                      navigator.clipboard.writeText(regRecoveryCode);
-                      alert('Recovery key copied to clipboard!');
-                    }}
-                    style={{ background: 'none', border: 'none', color: 'var(--neon-orange)', cursor: 'pointer' }}
-                  >
-                    <Copy size={16} />
+            {/* Step 3: Recovery & Submit */}
+            {setupStep === 3 && (
+              <form onSubmit={handleSetupSubmit}>
+                <div className="cyber-group" style={{ background: 'rgba(255,159,0,0.05)', border: '1px solid rgba(255,159,0,0.3)', padding: '15px', borderRadius: '8px', marginBottom: '25px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <label className="cyber-label" style={{ color: 'var(--neon-orange)', margin: 0 }}>
+                      Backup Paper Recovery Shard
+                    </label>
+                    <button 
+                      type="button"
+                      onClick={() => setShowShardInfo(!showShardInfo)}
+                      style={{
+                        background: 'none',
+                        border: 'none',
+                        color: 'var(--neon-orange)',
+                        cursor: 'pointer',
+                        padding: '4px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center'
+                      }}
+                      title="Learn how recovery shards work"
+                    >
+                      <HelpCircle size={16} />
+                    </button>
+                  </div>
+                  <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', margin: '6px 0' }}>
+                    Write this key down. If you lose your visual path grid shape, use this code to recover access offline.
+                  </p>
+                  
+                  {showShardInfo && (
+                    <div style={{
+                      marginTop: '10px',
+                      background: 'rgba(255,159,0,0.08)',
+                      border: '1px dashed rgba(255,159,0,0.4)',
+                      padding: '12px',
+                      borderRadius: '6px',
+                      fontSize: '0.8rem',
+                      color: 'rgba(255,255,255,0.85)',
+                      animation: 'fadeIn 0.25s ease-out',
+                      textAlign: 'left',
+                      marginBottom: '15px'
+                    }}>
+                      <strong style={{ color: 'var(--neon-orange)' }}>🛡️ Recovery Key Security Specifications:</strong>
+                      <ul style={{ margin: '8px 0 0 0', paddingLeft: '16px', display: 'flex', flexDirection: 'column', gap: '6px', listStyleType: 'disc' }}>
+                        <li><strong>Zero-Knowledge</strong>: The server only stores the SHA-256 hash of this shard. The raw code is never transmitted or saved online.</li>
+                        <li><strong>Anti-SIM Swap</strong>: Completely immune to network/SMS interception because recovery remains physical and offline.</li>
+                        <li><strong>Device Override</strong>: Enables a cryptographically secure override to rotate your WebAuthn keys and draw a new pattern if you lose your physical machine.</li>
+                      </ul>
+                    </div>
+                  )}
+                  <div style={{ display: 'flex', gap: '10px', alignItems: 'center', background: 'rgba(0,0,0,0.3)', padding: '8px 12px', borderRadius: '4px', border: '1px solid rgba(255,159,0,0.2)' }}>
+                    <code style={{ fontFamily: 'Fira Code', fontSize: '0.9rem', color: 'var(--neon-orange)', flex: 1 }}>{regRecoveryCode}</code>
+                    <button 
+                      type="button" 
+                      onClick={() => {
+                        navigator.clipboard.writeText(regRecoveryCode);
+                        alert('Recovery code copied!');
+                      }}
+                      style={{ background: 'none', border: 'none', color: 'var(--neon-orange)', cursor: 'pointer' }}
+                    >
+                      <Copy size={16} />
+                    </button>
+                  </div>
+                </div>
+
+                <div style={{ display: 'flex', gap: '15px' }}>
+                  <button type="button" className="cyber-btn cyber-btn-secondary" onClick={() => setSetupStep(2)} style={{ flex: 1 }}>
+                    Back
+                  </button>
+                  <button type="submit" className="cyber-btn cyber-btn-cyan" style={{ flex: 2 }}>
+                    Activate Encrypted Vault
                   </button>
                 </div>
-              </div>
+              </form>
+            )}
 
-              <button type="submit" className="cyber-btn cyber-btn-cyan" style={{ width: '100%' }}>
-                Activate Encrypted Wallet Vault
-              </button>
-            </form>
           </div>
         ) : (
           /* WALLET COCKPIT SCREEN (If registered) */
@@ -352,13 +613,13 @@ function App() {
                 </div>
                 
                 <h2 className="vault-status-indicator" style={{ fontFamily: 'Orbitron', fontWeight: 900 }}>
-                  {vaultLocked ? 'SEED PHRASE: LOCKED' : 'SEED PHRASE: DECRYPTED'}
+                  {vaultLocked ? 'VAULT SECRETS: LOCKED' : 'VAULT SECRETS: DECRYPTED'}
                 </h2>
                 
                 <p style={{ fontSize: '0.9rem', color: 'var(--text-muted)', marginTop: '10px' }}>
                   {vaultLocked 
-                    ? 'Your highly confidential cryptocurrency recovery seed phrase is encrypted at rest. Perform the cognitive visual grid challenge to reveal.'
-                    : 'Security clearance verified. Decrypted seed phrase loaded.'
+                    ? 'Your database credentials and private keys are encrypted at rest. Primary Biometric Passkey + Secondary Cognitive Grid challenge required to decrypt.'
+                    : 'Security clearance verified. Decrypted vault secrets loaded.'
                   }
                 </p>
 
@@ -396,7 +657,7 @@ function App() {
                           }}
                           style={{ marginTop: '15px', width: '100%', fontSize: '0.85rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
                         >
-                          <Edit size={14} /> Edit Stored Seed/Secrets
+                          <Edit size={14} /> Edit Stored Secrets/Credentials
                         </button>
                       </>
                     )}
@@ -410,7 +671,7 @@ function App() {
                       onClick={handleUnlockRequest}
                       style={{ width: '100%' }}
                     >
-                      Decrypt Wallet Vault
+                      Decrypt Shield Vault
                     </button>
                   ) : (
                     !isEditing && (
@@ -433,17 +694,14 @@ function App() {
               {/* Security Explainer Card */}
               <div className="glow-panel" style={{ border: '1px solid rgba(0,242,254,0.1)' }}>
                 <h3 style={{ fontFamily: 'Orbitron', marginBottom: '15px', color: 'var(--neon-cyan)', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <HelpCircle size={18} /> How GridShield Works
+                  <HelpCircle size={18} /> Two-Layer Security Protocol
                 </h3>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', fontSize: '0.85rem', color: 'var(--text-main)' }}>
                   <div style={{ borderLeft: '2px solid var(--neon-cyan)', paddingLeft: '10px' }}>
-                    <strong>Keylogger Defense:</strong> Because the challenge grid randomizes every time, the characters you type are different for every verification. Even if an attacker records your keyboard, the captured characters are useless.
+                    <strong>Layer 1 (Passkey)</strong>: WebAuthn cryptographically proves physical device ownership and biometric authentication. Protects against remote attackers.
                   </div>
                   <div style={{ borderLeft: '2px solid var(--neon-cyan)', paddingLeft: '10px' }}>
-                    <strong>Cognitive Ease:</strong> You do not need to memorize complex passwords. You only need to memorize a visual shape (like a diagonal) on a 5x5 grid.
-                  </div>
-                  <div style={{ borderLeft: '2px solid var(--neon-cyan)', paddingLeft: '10px' }}>
-                    <strong>No Password File:</strong> No plain-text passwords or biometrics are transmitted or stored on server vaults.
+                    <strong>Layer 2 (Cognitive Grid)</strong>: Proves human knowledge. Even if an attacker steals your device unlocked or coerces TouchID, they cannot decrypt the secrets because the visual path is strictly in your brain.
                   </div>
                 </div>
               </div>
@@ -472,7 +730,7 @@ function App() {
                       <RefreshCw size={20} /> Recover Vault Key
                     </h3>
                     <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '15px' }}>
-                      Enter your backup recovery shard code and draw a new visual pattern below.
+                      Enter your backup recovery code. For security on a new device, you will also enroll a new biometric Passkey.
                     </p>
 
                     <form onSubmit={handleRecoverySubmit}>
@@ -486,6 +744,17 @@ function App() {
                           placeholder="SHARD-XXXX-YYYY"
                           required 
                         />
+                      </div>
+
+                      <div style={{ marginBottom: '20px' }}>
+                        <button
+                          type="button"
+                          className="cyber-btn cyber-btn-secondary"
+                          onClick={handleRegisterRecoveryPasskey}
+                          style={{ width: '100%', border: recPasskeyRegistered ? '1px solid var(--neon-green)' : '1px solid var(--panel-border)', color: recPasskeyRegistered ? 'var(--neon-green)' : 'var(--text-main)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
+                        >
+                          <Fingerprint size={16} /> {recPasskeyRegistered ? 'Passkey Enrolled ✓' : 'Register New Device Passkey'}
+                        </button>
                       </div>
 
                       <div className="cyber-group">
@@ -547,25 +816,187 @@ function App() {
         )}
       </div>
 
-      {/* Challenge Modal Overlay */}
+      {/* Dynamic Documentation Section */}
+      <div className="glow-panel" style={{ marginTop: 'auto', width: '100%', border: '1px solid var(--panel-border)', paddingTop: '30px' }}>
+
+        
+        {/* Toggle Buttons */}
+        <div style={{ display: 'flex', gap: '15px', justifyContent: 'center', flexWrap: 'wrap', marginBottom: '25px' }}>
+          <button 
+            type="button"
+            className={`cyber-btn ${activeDocTab === 'features' ? 'cyber-btn-cyan' : 'cyber-btn-secondary'}`}
+            onClick={() => setActiveDocTab(activeDocTab === 'features' ? null : 'features')}
+            style={{ minWidth: '180px' }}
+          >
+            Key Features
+          </button>
+          <button 
+            type="button"
+            className={`cyber-btn ${activeDocTab === 'ps' ? 'cyber-btn-cyan' : 'cyber-btn-secondary'}`}
+            onClick={() => setActiveDocTab(activeDocTab === 'ps' ? null : 'ps')}
+            style={{ minWidth: '180px' }}
+          >
+            How this solves PS
+          </button>
+          <button 
+            type="button"
+            className={`cyber-btn ${activeDocTab === 'matrix' ? 'cyber-btn-cyan' : 'cyber-btn-secondary'}`}
+            onClick={() => setActiveDocTab(activeDocTab === 'matrix' ? null : 'matrix')}
+            style={{ minWidth: '180px' }}
+          >
+            Threat Mitigation Matrix
+          </button>
+        </div>
+
+        {/* Tab Contents */}
+        {activeDocTab && (
+          <div style={{ position: 'relative', borderTop: '1px solid var(--panel-border)', paddingTop: '20px', marginTop: '10px', animation: 'fadeIn 0.3s ease-out' }}>
+            {/* Collapse Button */}
+            <button 
+              type="button" 
+              onClick={() => setActiveDocTab(null)} 
+              className="cyber-btn cyber-btn-pink"
+              style={{
+                position: 'absolute',
+                top: '20px',
+                right: '0',
+                padding: '8px',
+                borderRadius: '50%',
+                minWidth: 'auto',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center'
+              }}
+              title="Collapse Panel"
+            >
+              <X size={16} />
+            </button>
+
+            {activeDocTab === 'features' && (
+              <div>
+                <h3 style={{ fontFamily: 'Orbitron', color: 'var(--neon-cyan)', marginBottom: '15px' }}>Key Security Features</h3>
+                <ul style={{ display: 'flex', flexDirection: 'column', gap: '12px', listStyleType: 'none', padding: 0, paddingRight: '140px' }}>
+                  <li style={{ background: 'rgba(255,255,255,0.02)', padding: '12px', borderRadius: '6px', borderLeft: '3px solid var(--neon-cyan)', textAlign: 'left' }}>
+                    <strong>Two-Layer Credentials (MFA)</strong>: Integrates hardware-bound biometrics (WebAuthn Passkeys) for physical presence, with a cognitive spatial memorized pattern for access control.
+                  </li>
+                  <li style={{ background: 'rgba(255,255,255,0.02)', padding: '12px', borderRadius: '6px', borderLeft: '3px solid var(--neon-cyan)', textAlign: 'left' }}>
+                    <strong>Zero-Knowledge Keystrokes</strong>: Grid challenge randomizes on every unlock request. You never type your visual pattern coordinates, only randomized letters, completely neutralizing keyloggers.
+                  </li>
+                  <li style={{ background: 'rgba(255,255,255,0.02)', padding: '12px', borderRadius: '6px', borderLeft: '3px solid var(--neon-cyan)', textAlign: 'left' }}>
+                    <strong>Memory-Bound Security (Cognitive)</strong>: No visual grid coordinates, master decryption keys, or session tokens are stored in browser memory, Chrome autofill, or local vaults. The master visual key pattern remains strictly inside your head.
+                  </li>
+                  <li style={{ background: 'rgba(255,255,255,0.02)', padding: '12px', borderRadius: '6px', borderLeft: '3px solid var(--neon-cyan)', textAlign: 'left' }}>
+                    <strong>Paper Shard Recovery</strong>: Enables complete account recovery and device rotation using a decentralized recovery shard key, keeping user keys private.
+                  </li>
+                </ul>
+              </div>
+            )}
+
+            {activeDocTab === 'ps' && (
+              <div>
+                <h3 style={{ fontFamily: 'Orbitron', color: 'var(--neon-cyan)', marginBottom: '15px' }}>Alignment with Hackathon Security Goals</h3>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '15px', textAlign: 'left', paddingRight: '140px' }}>
+                  <div style={{ background: 'rgba(255,255,255,0.02)', padding: '15px', borderRadius: '8px', borderLeft: '3px solid var(--neon-green)' }}>
+                    <h4 style={{ color: 'var(--neon-green)', margin: '0 0 8px 0', fontSize: '1.05rem', fontFamily: 'Orbitron' }}>Goal 1: Keylogger & Phishing Resistance (Passwordless First)</h4>
+                    <p style={{ margin: 0, fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+                      <strong>Our Solution</strong>: ShieldVault is 100% passwordless. There is no text-based password created, stored, or typed. Users enroll device-bound WebAuthn Passkeys combined with a randomized cognitive visual grid check.
+                    </p>
+                  </div>
+                  <div style={{ background: 'rgba(255,255,255,0.02)', padding: '15px', borderRadius: '8px', borderLeft: '3px solid var(--neon-green)' }}>
+                    <h4 style={{ color: 'var(--neon-green)', margin: '0 0 8px 0', fontSize: '1.05rem', fontFamily: 'Orbitron' }}>Goal 2: Biometric Bypass Prevention (Multi-Factor Security)</h4>
+                    <p style={{ margin: 0, fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+                      <strong>Our Solution</strong>: While we leverage native WebAuthn (Passkeys) for device possession, we mandate a custom-engineered Cognitive Grid Verification layer. The second layer is a proprietary visual path challenge-response verification system that we wrote from scratch.
+                    </p>
+                  </div>
+                  <div style={{ background: 'rgba(255,255,255,0.02)', padding: '15px', borderRadius: '8px', borderLeft: '3px solid var(--neon-green)' }}>
+                    <h4 style={{ color: 'var(--neon-green)', margin: '0 0 8px 0', fontSize: '1.05rem', fontFamily: 'Orbitron' }}>Goal 3: Device & Channel Loss Recovery (High Resilience)</h4>
+                    <p style={{ margin: 0, fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+                      <strong>Our Solution</strong>: ShieldVault provides a cryptographic <strong>Paper Shard Recovery</strong> protocol. If a user loses their device (or clears browser state), they can restore credentials and register new passkeys by entering their offline-saved Recovery Shard key, ensuring no weak fallbacks (like SMS, email, or security questions) compromise the vault.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {activeDocTab === 'matrix' && (
+              <div style={{ overflowX: 'auto' }}>
+                <h3 style={{ fontFamily: 'Orbitron', color: 'var(--neon-cyan)', marginBottom: '15px' }}>Detailed Threat Mitigation Matrix</h3>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem', color: 'var(--text-main)', textAlign: 'left' }}>
+                  <thead>
+                    <tr style={{ borderBottom: '2px solid var(--panel-border)' }}>
+                      <th style={{ padding: '12px', color: 'var(--neon-cyan)', fontFamily: 'Orbitron' }}>Threat Vector</th>
+                      <th style={{ padding: '12px', color: 'var(--neon-pink)', fontFamily: 'Orbitron' }}>Vulnerability of Standard Systems</th>
+                      <th style={{ padding: '12px', color: 'var(--neon-green)', fontFamily: 'Orbitron' }}>How ShieldVault Solves It</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                      <td style={{ padding: '12px', fontWeight: 'bold' }}>Keyloggers & Keystroke Malware</td>
+                      <td style={{ padding: '12px', color: 'var(--text-muted)' }}>Captures credentials (passwords, PINs, static 2FA codes) as they are typed.</td>
+                      <td style={{ padding: '12px', color: 'var(--neon-green)' }}><strong>Grid Randomization</strong>: The challenge grid characters randomize on every single unlock. The typed characters are different every time, rendering recorded keystrokes useless.</td>
+                    </tr>
+                    <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                      <td style={{ padding: '12px', fontWeight: 'bold' }}>SIM Swapping</td>
+                      <td style={{ padding: '12px', color: 'var(--text-muted)' }}>Intercepts cellular SMS codes by hijacking the user's phone number.</td>
+                      <td style={{ padding: '12px', color: 'var(--neon-green)' }}><strong>SMS-Free Protocol</strong>: We do not use SMS, email verification, or cellular phone numbers. Authentication is completed entirely between the local device and the server.</td>
+                    </tr>
+                    <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                      <td style={{ padding: '12px', fontWeight: 'bold' }}>Device Theft (Unlocked/Bypassed)</td>
+                      <td style={{ padding: '12px', color: 'var(--text-muted)' }}>If a phone/laptop is stolen unlocked, Chrome/Safari auto-fills all stored passwords.</td>
+                      <td style={{ padding: '12px', color: 'var(--neon-green)' }}><strong>Mental Isolation</strong>: The master visual key path exists only in the user's head, not in any local browser storage, keychains, or cookies.</td>
+                    </tr>
+                    <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                      <td style={{ padding: '12px', fontWeight: 'bold' }}>Biometric Coercion</td>
+                      <td style={{ padding: '12px', color: 'var(--text-muted)' }}>An attacker forces you to touch the fingerprint reader or scans FaceID while you are asleep.</td>
+                      <td style={{ padding: '12px', color: 'var(--neon-green)' }}><strong>Two-Layer Mandate</strong>: Biometrics only passes Layer 1. The vault remains locked until you actively look at the grid and type the correct path sequence.</td>
+                    </tr>
+                    <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                      <td style={{ padding: '12px', fontWeight: 'bold' }}>Fraudulent OTP Phishing</td>
+                      <td style={{ padding: '12px', color: 'var(--text-muted)' }}>Relays intercepted OTP codes from a fake screen to log in to the real site.</td>
+                      <td style={{ padding: '12px', color: 'var(--neon-green)' }}><strong>Challenge Bound</strong>: The response characters are valid only for the specific grid shown. A fake grid from a phishing site will be rejected by the real server.</td>
+                    </tr>
+                    <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                      <td style={{ padding: '12px', fontWeight: 'bold' }}>Dictionary & Bruteforce Attacks</td>
+                      <td style={{ padding: '12px', color: 'var(--text-muted)' }}>Automated scripts try millions of common textual passwords.</td>
+                      <td style={{ padding: '12px', color: 'var(--neon-green)' }}><strong>Spatial Complexity</strong>: There is no textual password. Guessing a 5-node path out of 25 dots offers 53,130 combinations, which are blocked after 3 attempts.</td>
+                    </tr>
+                    <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                      <td style={{ padding: '12px', fontWeight: 'bold' }}>Credential Auto-Fill Stealers</td>
+                      <td style={{ padding: '12px', color: 'var(--text-muted)' }}>Stealer malware targets saved browser credentials and cookies.</td>
+                      <td style={{ padding: '12px', color: 'var(--neon-green)' }}><strong>No Stored Cognitive Coordinates</strong>: The master decryption key is your memorized visual path. No browser database, autofill credential file, or local storage contains this pattern, leaving nothing for browser stealers to extract.</td>
+                    </tr>
+                    <tr>
+                      <td style={{ padding: '12px', fontWeight: 'bold' }}>Shoulder Surfing (Keystroke Spying)</td>
+                      <td style={{ padding: '12px', color: 'var(--text-muted)' }}>An observer watches you type your credentials.</td>
+                      <td style={{ padding: '12px', color: 'var(--neon-green)' }}><strong>One-Time Token</strong>: They only see you type 5 random letters that change on every login, which cannot be reused to log in later.</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Dynamic Challenge Modal Overlay */}
       {showChallenge && (
         <div className="modal-overlay">
-          <div className="modal-content">
-            <div className="siren-animation" style={{ animation: 'none' }}>
+          <div className="modal-content" style={{ border: '2px solid var(--neon-cyan)', boxShadow: '0 0 35px var(--neon-cyan-glow)' }}>
+            <div className="siren-animation" style={{ animation: 'none', border: '2px solid var(--neon-cyan)', color: 'var(--neon-cyan)' }}>
               <Key size={36} />
             </div>
 
-            <h3 style={{ fontFamily: 'Orbitron', marginBottom: '10px', color: 'var(--neon-pink)' }}>
-              Enter Cognitive Signature
+            <h3 style={{ fontFamily: 'Orbitron', marginBottom: '10px', color: 'var(--neon-cyan)' }}>
+              Layer 2: Visual Grid Signature
             </h3>
             
             <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '20px' }}>
-              Type the 5 characters that fall on your **Secret visual path coordinates** in numerical order (top-left to bottom-right).
+              TouchID/Biometrics verified successfully. Now, input the 5 characters that fall on your <strong>Secret visual path coordinates</strong> in numerical order (top-left to bottom-right).
             </p>
 
             {/* Random Challenge Grid */}
             <div style={{ display: 'flex', justifyContent: 'center', margin: '20px 0' }}>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 45px)', gap: '12px', background: 'rgba(2,3,6,0.9)', padding: '16px', borderRadius: '12px', border: '1px solid var(--neon-pink)', boxShadow: '0 0 20px rgba(255, 0, 127, 0.1)' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 45px)', gap: '12px', background: 'rgba(2,3,6,0.9)', padding: '16px', borderRadius: '12px', border: '1px solid var(--neon-cyan)', boxShadow: '0 0 20px rgba(0, 242, 254, 0.1)' }}>
                 {challengeGrid.map((char, idx) => (
                   <div
                     key={idx}
@@ -574,11 +1005,11 @@ function App() {
                       height: '45px',
                       borderRadius: '50%',
                       background: 'rgba(255, 255, 255, 0.02)',
-                      border: '1px solid rgba(255, 0, 127, 0.25)',
+                      border: '1px solid rgba(0, 242, 254, 0.25)',
                       fontFamily: 'Orbitron, sans-serif',
                       fontSize: '1.05rem',
                       fontWeight: 'bold',
-                      color: 'var(--neon-pink)',
+                      color: 'var(--neon-cyan)',
                       display: 'flex',
                       alignItems: 'center',
                       justifyContent: 'center'
@@ -598,7 +1029,7 @@ function App() {
                   value={challengeResponse} 
                   onChange={e => setChallengeResponse(e.target.value.toUpperCase())} 
                   placeholder="Type response letters..."
-                  style={{ textAlign: 'center', letterSpacing: '4px', fontSize: '1.2rem', fontFamily: 'Fira Code' }}
+                  style={{ textAlign: 'center', letterSpacing: '4px', fontSize: '1.2rem', fontFamily: 'Fira Code', borderColor: 'var(--neon-cyan)' }}
                   required 
                   autoFocus
                 />
@@ -615,14 +1046,14 @@ function App() {
                   Abort
                 </button>
                 <button type="submit" className="cyber-btn cyber-btn-cyan" style={{ flex: 1 }}>
-                  Verify Signature
+                  Verify Grid Key
                 </button>
               </div>
             </form>
           </div>
         </div>
       )}
-    </>
+    </div>
   );
 }
 
